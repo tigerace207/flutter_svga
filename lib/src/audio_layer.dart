@@ -95,8 +95,10 @@ class SVGAAudioLayer {
 
   Future<void> dispose() async {
     if (_disposed) return;
+    if (isPlaying() || isPaused()) {
+      await _player.stop();
+    }
     _disposed = true;
-    if (isPlaying()) stopAudio();
     await _player.dispose();
   }
 }

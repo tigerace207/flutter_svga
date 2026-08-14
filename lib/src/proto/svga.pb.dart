@@ -2179,6 +2179,7 @@ class MovieEntity extends $pb.GeneratedMessage {
   bool get isMemoryReleased => _memoryReleased;
 
   void dispose() {
+    dynamicItem.reset();
     bitmapCache.values.forEach((element) {
       element.dispose();
     });

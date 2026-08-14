@@ -31,7 +31,10 @@ class SVGAParser {
 
   /// Download animation file from remote server, and decode it.
   /// Automatically uses cache if available and enabled.
-  Future<MovieEntity> decodeFromURL(String url, {SVGAImageDecodeSize? imageDecodeSize}) async {
+  Future<MovieEntity> decodeFromURL(
+    String url, {
+    SVGAImageDecodeSize? imageDecodeSize,
+  }) async {
     // Try to get from cache first
     final cachedBytes = await SVGACache.shared.getRawBytes(url);
     if (cachedBytes != null) {
@@ -50,7 +53,10 @@ class SVGAParser {
 
   /// Download animation file from bundle assets, and decode it.
   /// Automatically uses cache if available and enabled.
-  Future<MovieEntity> decodeFromAssets(String path, {SVGAImageDecodeSize? imageDecodeSize}) async {
+  Future<MovieEntity> decodeFromAssets(
+    String path, {
+    SVGAImageDecodeSize? imageDecodeSize,
+  }) async {
     // Try to get from cache first
     final cachedBytes = await SVGACache.shared.getRawBytes('assets:$path');
     if (cachedBytes != null) {
@@ -68,7 +74,10 @@ class SVGAParser {
   }
 
   /// Download animation file from buffer, and decode it.
-  Future<MovieEntity> decodeFromBuffer(List<int> bytes, {SVGAImageDecodeSize? imageDecodeSize}) {
+  Future<MovieEntity> decodeFromBuffer(
+    List<int> bytes, {
+    SVGAImageDecodeSize? imageDecodeSize,
+  }) {
     TimelineTask? timeline;
     if (!kReleaseMode) {
       timeline = TimelineTask(filterKey: _filterKey)
@@ -83,7 +92,10 @@ class SVGAParser {
     }
     final movie = MovieEntity.fromBuffer(inflatedBytes);
     if (timeline != null) {
-      timeline.instant('prepareResources()', arguments: {'images': movie.images.keys.join(',')});
+      timeline.instant(
+        'prepareResources()',
+        arguments: {'images': movie.images.keys.join(',')},
+      );
     }
     return _prepareResources(
       _processShapeItems(movie),
@@ -99,7 +111,8 @@ class SVGAParser {
       List<ShapeEntity>? lastShape;
       for (var frame in sprite.frames) {
         if (frame.shapes.isNotEmpty && frame.shapes.isNotEmpty) {
-          if (frame.shapes[0].type == ShapeEntity_ShapeType.KEEP && lastShape != null) {
+          if (frame.shapes[0].type == ShapeEntity_ShapeType.KEEP &&
+              lastShape != null) {
             frame.shapes = lastShape;
           } else if (frame.shapes.isNotEmpty == true) {
             lastShape = frame.shapes;
@@ -120,31 +133,33 @@ class SVGAParser {
       movieItem.releaseMemory();
       return Future.value(movieItem);
     }
-    return Future.wait(
-      images.entries.map((item) async {
+    // Decoding every embedded image concurrently retains all compressed bytes,
+    // codec buffers, and output textures at once. Sequential decoding keeps the
+    // final texture memory the same while substantially reducing peak memory.
+    return () async {
+      for (final item in images.entries) {
         // result null means a decoding error occurred
-        Uint8List data = Uint8List.fromList(item.value);
+        final data = Uint8List.fromList(item.value);
         if (isMP3Data(data)) {
           movieItem.audiosData[item.key] = data;
-        } else {
-          final decodeImage = await _decodeImageItem(
-            item.key,
-            data,
-            timeline: timeline,
-            imageDecodeSize: imageDecodeSize,
-            viewBoxWidth: movieItem.params.viewBoxWidth,
-            viewBoxHeight: movieItem.params.viewBoxHeight,
-          );
-          if (decodeImage != null) {
-            movieItem.bitmapCache[item.key] = decodeImage;
-          }
+          continue;
         }
-      }),
-    ).then((_) {
+        final decodeImage = await _decodeImageItem(
+          item.key,
+          data,
+          timeline: timeline,
+          imageDecodeSize: imageDecodeSize,
+          viewBoxWidth: movieItem.params.viewBoxWidth,
+          viewBoxHeight: movieItem.params.viewBoxHeight,
+        );
+        if (decodeImage != null) {
+          movieItem.bitmapCache[item.key] = decodeImage;
+        }
+      }
       // Release protobuf internal structures to reduce memory
       movieItem.releaseMemory();
       return movieItem;
-    });
+    }();
   }
 
   Future<ui.Image?> _decodeImageItem(
@@ -234,7 +249,8 @@ class SVGAParser {
   bool isMP3Data(Uint8List data) {
     const mp3MagicNumber = 'ID3';
     bool result = false;
-    if (String.fromCharCodes(data.take(mp3MagicNumber.length)) == mp3MagicNumber) {
+    if (String.fromCharCodes(data.take(mp3MagicNumber.length)) ==
+        mp3MagicNumber) {
       result = true;
     }
     return result;

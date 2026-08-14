@@ -1,5 +1,6 @@
 library;
 
+import 'dart:async';
 import 'dart:math';
 import 'dart:typed_data';
 
@@ -93,6 +94,7 @@ class SVGAAnimationController extends AnimationController {
     if (isAnimating) {
       stop();
     }
+    _disposeAudioLayers();
     if (value == null) {
       clear();
     }
@@ -124,6 +126,15 @@ class SVGAAnimationController extends AnimationController {
     }
     // reset progress after videoitem changed
     reset();
+  }
+
+  void _disposeAudioLayers() {
+    if (_audioLayers.isEmpty) return;
+    final audioLayers = List<SVGAAudioLayer>.of(_audioLayers);
+    _audioLayers.clear();
+    for (final audio in audioLayers) {
+      unawaited(audio.dispose());
+    }
   }
 
   MovieEntity? get videoItem => _videoItem;
@@ -171,9 +182,6 @@ class SVGAAnimationController extends AnimationController {
   bool _isDisposed = false;
   @override
   void dispose() {
-    for (final audio in _audioLayers) {
-      audio.dispose();
-    }
     // auto dispose _videoItem when set null
     videoItem = null;
     _isDisposed = true;
