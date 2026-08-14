@@ -1,4 +1,5 @@
 import 'dart:developer';
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:archive/archive.dart' as archive;
@@ -12,6 +13,17 @@ import 'proto/svga.pbserver.dart';
 
 const _filterKey = 'SVGAParser';
 
+/// The physical pixel size of the surface that will display an SVGA.
+///
+/// The parser uses this to downsample embedded raster layers before they
+/// become GPU textures. It does not modify the original SVGA bytes.
+class SVGAImageDecodeSize {
+  const SVGAImageDecodeSize({required this.width, required this.height});
+
+  final int width;
+  final int height;
+}
+
 /// You use SVGAParser to load and decode animation files.
 class SVGAParser {
   const SVGAParser();
@@ -19,11 +31,11 @@ class SVGAParser {
 
   /// Download animation file from remote server, and decode it.
   /// Automatically uses cache if available and enabled.
-  Future<MovieEntity> decodeFromURL(String url) async {
+  Future<MovieEntity> decodeFromURL(String url, {SVGAImageDecodeSize? imageDecodeSize}) async {
     // Try to get from cache first
     final cachedBytes = await SVGACache.shared.getRawBytes(url);
     if (cachedBytes != null) {
-      return decodeFromBuffer(cachedBytes);
+      return decodeFromBuffer(cachedBytes, imageDecodeSize: imageDecodeSize);
     }
 
     // Download and cache
@@ -33,16 +45,16 @@ class SVGAParser {
     // Cache the raw response bytes for future use
     await SVGACache.shared.putRawBytes(url, Uint8List.fromList(bytes));
 
-    return decodeFromBuffer(bytes);
+    return decodeFromBuffer(bytes, imageDecodeSize: imageDecodeSize);
   }
 
   /// Download animation file from bundle assets, and decode it.
   /// Automatically uses cache if available and enabled.
-  Future<MovieEntity> decodeFromAssets(String path) async {
+  Future<MovieEntity> decodeFromAssets(String path, {SVGAImageDecodeSize? imageDecodeSize}) async {
     // Try to get from cache first
     final cachedBytes = await SVGACache.shared.getRawBytes('assets:$path');
     if (cachedBytes != null) {
-      return decodeFromBuffer(cachedBytes);
+      return decodeFromBuffer(cachedBytes, imageDecodeSize: imageDecodeSize);
     }
 
     // Load from assets and cache
@@ -52,11 +64,11 @@ class SVGAParser {
     // Cache the asset bytes for future use
     await SVGACache.shared.putRawBytes('assets:$path', bytes);
 
-    return decodeFromBuffer(bytes);
+    return decodeFromBuffer(bytes, imageDecodeSize: imageDecodeSize);
   }
 
   /// Download animation file from buffer, and decode it.
-  Future<MovieEntity> decodeFromBuffer(List<int> bytes) {
+  Future<MovieEntity> decodeFromBuffer(List<int> bytes, {SVGAImageDecodeSize? imageDecodeSize}) {
     TimelineTask? timeline;
     if (!kReleaseMode) {
       timeline = TimelineTask(filterKey: _filterKey)
@@ -71,14 +83,12 @@ class SVGAParser {
     }
     final movie = MovieEntity.fromBuffer(inflatedBytes);
     if (timeline != null) {
-      timeline.instant(
-        'prepareResources()',
-        arguments: {'images': movie.images.keys.join(',')},
-      );
+      timeline.instant('prepareResources()', arguments: {'images': movie.images.keys.join(',')});
     }
     return _prepareResources(
       _processShapeItems(movie),
       timeline: timeline,
+      imageDecodeSize: imageDecodeSize,
     ).whenComplete(() {
       if (timeline != null) timeline.finish();
     });
@@ -89,8 +99,7 @@ class SVGAParser {
       List<ShapeEntity>? lastShape;
       for (var frame in sprite.frames) {
         if (frame.shapes.isNotEmpty && frame.shapes.isNotEmpty) {
-          if (frame.shapes[0].type == ShapeEntity_ShapeType.KEEP &&
-              lastShape != null) {
+          if (frame.shapes[0].type == ShapeEntity_ShapeType.KEEP && lastShape != null) {
             frame.shapes = lastShape;
           } else if (frame.shapes.isNotEmpty == true) {
             lastShape = frame.shapes;
@@ -104,6 +113,7 @@ class SVGAParser {
   Future<MovieEntity> _prepareResources(
     MovieEntity movieItem, {
     TimelineTask? timeline,
+    SVGAImageDecodeSize? imageDecodeSize,
   }) {
     final images = movieItem.images;
     if (images.isEmpty) {
@@ -121,6 +131,9 @@ class SVGAParser {
             item.key,
             data,
             timeline: timeline,
+            imageDecodeSize: imageDecodeSize,
+            viewBoxWidth: movieItem.params.viewBoxWidth,
+            viewBoxHeight: movieItem.params.viewBoxHeight,
           );
           if (decodeImage != null) {
             movieItem.bitmapCache[item.key] = decodeImage;
@@ -138,6 +151,9 @@ class SVGAParser {
     String key,
     Uint8List bytes, {
     TimelineTask? timeline,
+    SVGAImageDecodeSize? imageDecodeSize,
+    required double viewBoxWidth,
+    required double viewBoxHeight,
   }) async {
     TimelineTask? task;
     if (!kReleaseMode) {
@@ -145,7 +161,14 @@ class SVGAParser {
         ..start('DecodeImage', arguments: {'key': key, 'length': bytes.length});
     }
     try {
-      final image = await decodeImageFromList(bytes);
+      final image = imageDecodeSize == null
+          ? await decodeImageFromList(bytes)
+          : await _decodeImageAtTargetSize(
+              bytes,
+              imageDecodeSize: imageDecodeSize,
+              viewBoxWidth: viewBoxWidth,
+              viewBoxHeight: viewBoxHeight,
+            );
       if (task != null) {
         task.finish(arguments: {'imageSize': '${image.width}x${image.height}'});
       }
@@ -172,11 +195,46 @@ class SVGAParser {
     }
   }
 
+  Future<ui.Image> _decodeImageAtTargetSize(
+    Uint8List bytes, {
+    required SVGAImageDecodeSize imageDecodeSize,
+    required double viewBoxWidth,
+    required double viewBoxHeight,
+  }) async {
+    final buffer = await ui.ImmutableBuffer.fromUint8List(bytes);
+    final descriptor = await ui.ImageDescriptor.encoded(buffer);
+    try {
+      final scale = math.min(
+        imageDecodeSize.width / viewBoxWidth,
+        imageDecodeSize.height / viewBoxHeight,
+      );
+      final targetWidth = math.min(
+        descriptor.width,
+        math.max(1, (descriptor.width * scale).round()),
+      );
+      final targetHeight = math.min(
+        descriptor.height,
+        math.max(1, (descriptor.height * scale).round()),
+      );
+      final codec = await descriptor.instantiateCodec(
+        targetWidth: targetWidth,
+        targetHeight: targetHeight,
+      );
+      try {
+        return (await codec.getNextFrame()).image;
+      } finally {
+        codec.dispose();
+      }
+    } finally {
+      descriptor.dispose();
+      buffer.dispose();
+    }
+  }
+
   bool isMP3Data(Uint8List data) {
     const mp3MagicNumber = 'ID3';
     bool result = false;
-    if (String.fromCharCodes(data.take(mp3MagicNumber.length)) ==
-        mp3MagicNumber) {
+    if (String.fromCharCodes(data.take(mp3MagicNumber.length)) == mp3MagicNumber) {
       result = true;
     }
     return result;
